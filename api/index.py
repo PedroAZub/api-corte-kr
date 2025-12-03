@@ -1,63 +1,60 @@
 from flask import Flask, Response
-import requests
 import json
 import re
+# Usamos a biblioteca nativa do Python em vez de requests
+# Isso evita erros de instalação na Vercel
+import urllib.request 
 
 app = Flask(__name__)
 
-# Rota curinga (aceita qualquer link)
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def handler(path):
-    # Se na URL tiver "chall", busca Challenger. Senão, busca GM.
     tier = "challenger" if "chall" in path else "grandmaster"
     
     try:
-        # Lógica OP.GG:
-        # Challenger = Rank 300 (Página 3)
-        # Grão-Mestre = Rank 1000 (Página 10)
-        page = 3 if tier == "challenger" else 10
-        url = f"https://www.op.gg/leaderboards/tier?region=kr&page={page}"
+        # URL do DeepLoL (Onde tem o cabeçalho da sua imagem)
+        url = "https://www.deeplol.gg/ranking/KR/all"
         
-        # Headers para não ser bloqueado
+        # Headers para fingir ser Googlebot
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
         }
 
-        # Timeout curto
-        resp = requests.get(url, headers=headers, timeout=5)
+        # Requisição NATIVA (Sem biblioteca requests)
+        req = urllib.request.Request(url, headers=headers)
         
-        if resp.status_code != 200:
-            return Response(f"Erro: OP.GG retornou {resp.status_code}", mimetype='text/plain')
-
-        # BUSCA INTELIGENTE (SEM BEAUTIFULSOUP)
-        # Procura o JSON escondido no HTML usando Regex (mais leve e rápido)
-        match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', resp.text)
-        
-        if match:
-            # Carrega os dados
-            data = json.loads(match.group(1))
+        with urllib.request.urlopen(req, timeout=5) as response:
+            # Lê o site e decodifica o texto
+            html_bytes = response.read()
+            html_text = html_bytes.decode('utf-8')
             
-            # Navega até a lista de jogadores: props -> pageProps -> data
-            try:
-                players = data['props']['pageProps']['data']
+            # --- ESTRATÉGIA DE BUSCA ---
+            # Procura o JSON "tierCutoff" direto no texto usando Regex.
+            # O DeepLoL escreve: "tierCutoff":{"grandmaster":803,"challenger":1140}
+            
+            # Procura por: "tierCutoff":{...}
+            match = re.search(r'"tierCutoff"\s*:\s*({[^}]+})', html_text)
+            
+            if match:
+                # Converte o texto achado para JSON
+                cutoff_data = json.loads(match.group(1))
                 
-                if not players:
-                    return Response("Erro: Lista vazia no OP.GG.", mimetype='text/plain')
+                # Tenta pegar grandmaster ou GRANDMASTER
+                val = cutoff_data.get(tier) or cutoff_data.get(tier.upper())
                 
-                # O corte é o LP do ÚLTIMO jogador da lista
-                last_player = players[-1]
-                lp = last_player.get('league_points')
-                
-                if lp is not None:
-                    return Response(f"{lp} LP", mimetype='text/plain')
-                    
-            except KeyError:
-                return Response("Erro: O OP.GG mudou a estrutura do site.", mimetype='text/plain')
-        
-        return Response("Erro: Dados do OP.GG não encontrados (Bloqueio?)", mimetype='text/plain')
+                if val:
+                    return Response(f"{val} LP", mimetype='text/plain')
+            
+            # Backup: Procura texto bruto "grandmaster":803
+            match_brute = re.search(rf'"{tier}"\s*:\s*(\d+)', html_text, re.IGNORECASE)
+            if match_brute:
+                return Response(f"{match_brute.group(1)} LP", mimetype='text/plain')
+
+            return Response("Erro: Valor não encontrado no código do site.", mimetype='text/plain')
 
     except Exception as e:
+        # Se der erro, mostra na tela em vez de dar Erro 500
         return Response(f"Erro Tecnico: {str(e)}", mimetype='text/plain')
 
 if __name__ == '__main__':
